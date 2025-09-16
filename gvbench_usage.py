@@ -18,7 +18,10 @@ def get_args():
     parser = argparse.ArgumentParser(description='Test GV-Bench with Doppelgangers classification model.')
     parser.add_argument('--data_root', type=str, required=True, help='Path to the input image dataset.')
     parser.add_argument('--output_path', type=str, required=True, help='Path to save output results.')
+    parser.add_argument('--seq', type=str, required=True, help='Sequence name.')
     parser.add_argument('--pretrained', type=str, default='checkpoints/dopp-crop-focalloss_lr1e-3_warmup20/checkpoint-best.pth', help="Path to the pretrained model checkpoint.")    
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for inference.')
+    parser.add_argument('--dry_run', action='store_true', help="Dry run with a subset of data.")
     args = parser.parse_args()
     return args
         
@@ -32,17 +35,19 @@ def doppelgangers_classifier(args):
                              add_dg_pred_head=True, freeze=['mask','encoder','decoder','head']).from_pretrained(args.pretrained).to(device)
 
     # pairs = np.load(f"{args.output_path}/pairs_list.npy")
-    pairs = np.load(f"{args.data_root}/labels/day.npy", allow_pickle=True)
+    pairs = np.load(f"{args.data_root}/labels/{args.seq}.npy", allow_pickle=True)
+    if args.dry_run:
+        pairs = pairs[:100]
     
     prob_list = []
     gt_list = []
-
+    
     for pair in tqdm(pairs, desc="Disambiguating pairs"):
         img1, img2, gt = pair
         gt_list.append(gt)
         img_paths = [os.path.join(args.data_root, "images", img) for img in [img1, img2]]
         images = load_images(img_paths, size=512, verbose=False)
-        output = inference(make_pairs(images), model, device, verbose=False)
+        output = inference(make_pairs(images), model, device, batch_size=args.batch_size, verbose=False)
 
         pred1, pred2 = output['pred1'], output['pred2']
         if isinstance(output['pred1'], list):
@@ -68,7 +73,7 @@ def doppelgangers_classifier(args):
             
         prob_list.append(score)
 
-    np.save(f"{args.output_path}/pair_probability_list_dgpp.npy", {'prob': np.array(prob_list).reshape(-1, 1), 'label': np.array(gt_list).reshape(-1, 1)})
+    np.save(f"{args.output_path}/{args.seq}_dgpp_pretrained_visymscenes.npy", {'prob': np.array(prob_list).reshape(-1, 1), 'label': np.array(gt_list).reshape(-1, 1)})
     
     return prob_list, gt_list
 
@@ -76,10 +81,9 @@ def main():
     args = get_args()
     os.makedirs(args.output_path, exist_ok=True)
     prob_list, gt_list = doppelgangers_classifier(args)
-    mr = eval.max_recall(np.array(prob_list), np.array(gt_list))
-    eval.plot_pr_curve(np.array(prob_list), np.array(gt_list))
-    import matplotlib.pyplot as plt
-    plt.show()
+    eval.plot_pr_curve(gt_list, prob_list, method_name=f"{args.seq}_Doppelgangers++_pretrained_visymscenes", save_path=f"{args.output_path}/{args.seq}_pr_curve_dgpp_visymscenes.png")
+    # import matplotlib.pyplot as plt
+    # plt.show()
     
 if __name__ == '__main__':
     main()
