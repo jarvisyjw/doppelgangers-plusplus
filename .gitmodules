@@ -2,3 +2,6 @@
 	path = dust3r
 	url = https://github.com/naver/dust3r
 	branch = cvpr
+[submodule "jw_utils"]
+	path = jw_utils
+	url = git@github.com:jarvisyjw/jw_utils.git
