@@ -36,8 +36,6 @@ from mast3r.inference import loss_of_one_batch  # noqa
 import dust3r.utils.path_to_croco  # noqa: F401
 import croco.utils.misc as misc  # noqa
 from croco.utils.misc import NativeScalerWithGradNormCount as NativeScaler  # noqa
-from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
-from scipy.special import softmax
 
 
 def get_args_parser():
@@ -395,13 +393,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, criterio
         data_loader.sampler.set_epoch(epoch)
 
     optimizer.zero_grad()
-    
-    # For tracking AP and AUC metrics
-    all_gts = []
-    all_preds = []
-    
-    # For periodic evaluation of metrics
-    eval_interval = min(1000, len(data_loader) // 5)  # Evaluate 5 times per epoch or every 1000 batches
 
     for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         epoch_f = epoch + data_iter_step / len(data_loader)
@@ -417,36 +408,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, criterio
                                        use_amp=bool(args.amp), ret='loss')
         loss, loss_details = loss_tuple  # criterion returns two values
         loss_value = float(loss)
-        
-        # Get predictions and ground truth for metrics calculation
-        with torch.no_grad():
-            loss_info = loss_of_one_batch(batch, model, 
-                                        criterion, criterion_dg, 
-                                        device,
-                                        symmetrize_batch=True,
-                                        use_amp=bool(args.amp))
-            
-            # Extract ground truth labels
-            gt = loss_info['view1']['dopp_label'][0].item()
-            
-            # Process predictions
-            score_s1 = softmax(loss_info['pred1'].detach().cpu().numpy(), axis=1)
-            score_s2 = softmax(loss_info['pred2'].detach().cpu().numpy(), axis=1)
-            
-            # Voting mechanism for final prediction
-            vote_0 = sum(score_s1[:,0] > score_s1[:,1]) + sum(score_s2[:,0] > score_s2[:,1])
-            vote_1 = sum(score_s1[:,1] > score_s1[:,0]) + sum(score_s2[:,1] > score_s2[:,0])
-            
-            if vote_1 > vote_0:
-                pred = np.max((score_s1[:,1], score_s2[:,1]))
-            elif vote_1 < vote_0:
-                pred = np.min((score_s1[:,1], score_s2[:,1]))
-            else:
-                pred = np.mean((score_s1[:,1], score_s2[:,1]))
-            
-            # Store for later calculation
-            all_gts.append(gt)
-            all_preds.append(pred)
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value), force=True)
@@ -465,28 +426,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, criterio
         metric_logger.update(epoch=epoch_f)
         metric_logger.update(lr=lr)
         metric_logger.update(loss=loss_value, **loss_details)
-        
-        # Calculate and log AP and AUC periodically during training
-        if (data_iter_step + 1) % eval_interval == 0 or data_iter_step == len(data_loader) - 1:
-            if len(all_gts) > 1 and len(np.unique(all_gts)) > 1:  # Ensure we have both positive and negative samples
-                try:
-                    # Calculate metrics
-                    ap = average_precision_score(np.array(all_gts), np.array(all_preds))
-                    auc = roc_auc_score(np.array(all_gts), np.array(all_preds))
-                    
-                    # Update logger
-                    metric_logger.update(AP=ap)
-                    metric_logger.update(AUC=auc)
-                    
-                    # Log to tensorboard
-                    if log_writer is not None:
-                        log_writer.add_scalar('train_AP', ap, int(epoch_f * 1000))
-                        log_writer.add_scalar('train_AUC', auc, int(epoch_f * 1000))
-                        swanlab.log({'train/AP': ap, 'train/AUC': auc}, step=int(epoch_f * 1000))
-                        
-                    print(f"Training metrics at step {data_iter_step+1}/{len(data_loader)}: AP={ap:.4f}, AUC={auc:.4f}")
-                except Exception as e:
-                    print(f"Error calculating metrics: {e}")
 
         if (data_iter_step + 1) % accum_iter == 0 and ((data_iter_step + 1) % (accum_iter * args.print_freq)) == 0:
             loss_value_reduce = misc.all_reduce_mean(loss_value)  # MUST BE EXECUTED BY ALL NODES
@@ -507,34 +446,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, criterio
                 "train/lr": lr, 
                 "train/iter": epoch_1000x
             }, step=epoch_1000x)
-            swanlab_loss_details = {f"train/{name}": val for name, val in loss_details.items()}
-            swanlab.log(swanlab_loss_details, step=epoch_1000x)
+            
                 
         if (data_iter_step + 1) % 10000 == 0:
             if args.distributed:
                 model_without_ddp = model.module
             misc.save_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer,
                         loss_scaler=loss_scaler, epoch=epoch, fname=f'epoch_{epoch}_iter_{data_iter_step}', best_so_far=None)
-
-    # Calculate final AP and AUC for the entire epoch
-    if len(all_gts) > 1 and len(np.unique(all_gts)) > 1:
-        try:
-            final_ap = average_precision_score(np.array(all_gts), np.array(all_preds))
-            final_auc = roc_auc_score(np.array(all_gts), np.array(all_preds))
-            
-            # Update the metrics for the epoch summary
-            metric_logger.update(epoch_AP=final_ap)
-            metric_logger.update(epoch_AUC=final_auc)
-            
-            if log_writer is not None:
-                log_writer.add_scalar('train_epoch_AP', final_ap, epoch)
-                log_writer.add_scalar('train_epoch_AUC', final_auc, epoch)
-                
-                swanlab.log({'train_epoch_AP': final_ap, 'train_epoch_AUC': final_auc}, step=epoch * 1000)
-                
-            print(f"Epoch {epoch} training metrics: AP={final_ap:.4f}, AUC={final_auc:.4f}")
-        except Exception as e:
-            print(f"Error calculating final epoch metrics: {e}")
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -560,59 +478,12 @@ def test_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module, criterion
     if hasattr(data_loader, 'sampler') and hasattr(data_loader.sampler, 'set_epoch'):
         data_loader.sampler.set_epoch(epoch)
 
-    # For tracking AP and AUC metrics
-    all_gts = []
-    all_preds = []
-
     for _, batch in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         loss_tuple = loss_of_one_batch(batch, model, criterion, criterion_dg, device,
                                        symmetrize_batch=True,
                                        use_amp=bool(args.amp), ret='loss')
         loss_value, loss_details = loss_tuple  # criterion returns two values
         metric_logger.update(loss=float(loss_value), **loss_details)
-        
-        # Get predictions and ground truth for metrics calculation
-        loss_info = loss_of_one_batch(batch, model, 
-                                    criterion, criterion_dg, 
-                                    device,
-                                    symmetrize_batch=True,
-                                    use_amp=bool(args.amp))
-        
-        # Extract ground truth labels
-        gt = loss_info['view1']['dopp_label'][0].item()
-        
-        # Process predictions
-        score_s1 = softmax(loss_info['pred1'].detach().cpu().numpy(), axis=1)
-        score_s2 = softmax(loss_info['pred2'].detach().cpu().numpy(), axis=1)
-        
-        # Voting mechanism for final prediction
-        vote_0 = sum(score_s1[:,0] > score_s1[:,1]) + sum(score_s2[:,0] > score_s2[:,1])
-        vote_1 = sum(score_s1[:,1] > score_s1[:,0]) + sum(score_s2[:,1] > score_s2[:,0])
-        
-        if vote_1 > vote_0:
-            pred = np.max((score_s1[:,1], score_s2[:,1]))
-        elif vote_1 < vote_0:
-            pred = np.min((score_s1[:,1], score_s2[:,1]))
-        else:
-            pred = np.mean((score_s1[:,1], score_s2[:,1]))
-        
-        # Store for later calculation
-        all_gts.append(gt)
-        all_preds.append(pred)
-
-    # Calculate AP and AUC for the test set
-    if len(all_gts) > 1 and len(np.unique(all_gts)) > 1:
-        try:
-            ap = average_precision_score(np.array(all_gts), np.array(all_preds))
-            auc = roc_auc_score(np.array(all_gts), np.array(all_preds))
-            
-            # Update logger
-            metric_logger.update(AP=ap)
-            metric_logger.update(AUC=auc)
-            
-            print(f"Test metrics: AP={ap:.4f}, AUC={auc:.4f}")
-        except Exception as e:
-            print(f"Error calculating test metrics: {e}")
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

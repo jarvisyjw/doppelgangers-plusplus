@@ -29,9 +29,9 @@ class Doppelgangers(BaseStereoViewDataset):
         self.test_metadatas = []
         for ds in trainon:
             if ds == 'dg':
-                self.train_metadatas += ['train_pairs_megadepth.npy', 'train_pairs_flip.npy', 'train_pairs_noflip.npy']
+                self.train_metadatas += ['train_pairs_megadepth_cleaned.npy', 'train_pairs_flip.npy', 'train_pairs_noflip.npy']
             if ds == 'visym':
-                self.train_metadatas += ['train_pairs_visym.npy']
+                self.train_metadatas += ['train_pairs_visym_cleaned.npy']
                 
         for ds in teston:
             if ds == 'dg':
@@ -49,11 +49,11 @@ class Doppelgangers(BaseStereoViewDataset):
 
     def _load_data(self, split):
         meta_to_image = {
-            'train_pairs_megadepth.npy': 'train_megadepth', 
+            'train_pairs_megadepth_cleaned.npy': 'train_megadepth', 
             'train_pairs_flip.npy': 'train_set_flip', 
             'train_pairs_noflip.npy': 'train_set_noflip', 
             'test_pairs.npy': 'test_set',
-            'train_pairs_visym.npy': '',
+            'train_pairs_visym_cleaned.npy': '',
         }
         if split == 'train':
             self.all_pairs = []
